@@ -141,26 +141,59 @@ async function loadProfile(userId) {
 async function loadZenQuote() {
   if (!zenLineEl) return;
 
-  const { data, error } = await supabaseClient
-    .from("zen_quotes")
-    .select("content, source")
-    .eq("enabled", true)
-    .limit(200);
+  try {
+    // 1) 先用「你原本的欄位」嘗試（content/source + enabled）
+    let { data, error } = await supabaseClient
+      .from("zen_quotes")
+      .select("content, source, enabled")
+      .eq("enabled", true)
+      .limit(300);
 
-  if (error) {
-    zenLineEl.textContent = "（自在語載入失敗）";
-    logDebug("zen_quotes error", error);
-    return;
+    // 2) 如果是「欄位不存在」(常見：enabled/content/source 不在你現在表)
+    //    就 fallback：直接 select * 不加 enabled 條件
+    if (error && (String(error.message || "").includes("column") || error.code === "42703")) {
+      logDebug("zen_quotes 欄位可能不同，改用 fallback select(*)", error);
+
+      ({ data, error } = await supabaseClient
+        .from("zen_quotes")
+        .select("*")
+        .limit(300));
+    }
+
+    // 3) 如果是 RLS/權限錯
+    if (error) {
+      zenLineEl.textContent = "（自在語載入失敗：請看 Debug）";
+      logDebug("zen_quotes error", error);
+      return;
+    }
+
+    if (!data || !data.length) {
+      zenLineEl.textContent = "（目前沒有自在語）";
+      logDebug("zen_quotes empty", { rows: 0 });
+      return;
+    }
+
+    // 4) 兼容不同欄位命名：content/text/quote + source/author
+    const pick = data[Math.floor(Math.random() * data.length)];
+    const content =
+      pick.content ?? pick.text ?? pick.quote ?? pick.body ?? pick.message ?? "";
+    const source =
+      pick.source ?? pick.author ?? pick.from ?? pick.ref ?? "";
+
+    if (!String(content).trim()) {
+      zenLineEl.textContent = "（自在語資料有，但找不到內容欄位）";
+      logDebug("zen_quotes missing content field", pick);
+      return;
+    }
+
+    zenLineEl.textContent = `「${content}」${source ? " — " + source : ""}`;
+    logDebug("zen_quotes ok", { content, source });
+  } catch (e) {
+    zenLineEl.textContent = "（自在語載入失敗：JS 例外，請看 Debug）";
+    logDebug("zen_quotes exception", { message: String(e?.message || e), e });
   }
-
-  if (!data || !data.length) {
-    zenLineEl.textContent = "（目前沒有自在語）";
-    return;
-  }
-
-  const pick = data[Math.floor(Math.random() * data.length)];
-  zenLineEl.textContent = `「${pick.content}」${pick.source ? " — " + pick.source : ""}`;
 }
+
 
 // ===============================
 // 4) 日期工具
@@ -1242,46 +1275,47 @@ payloads.push({
 document.addEventListener("DOMContentLoaded", async () => {
   logDebug("page loaded");
 
-  if (isIndexPage) {
-    const user = await getCurrentUser();
-    if (user) location.href = "ledger.html";
+if (isLedgerPage) {
+  const user = await getCurrentUser();
+  if (!user) {
+    location.href = "index.html";
     return;
   }
 
-  if (isLedgerPage) {
-    const user = await getCurrentUser();
-    if (!user) {
-      location.href = "index.html";
-      return;
-    }
+  // 1) 載入 autocomplete / 快取
+  await loadSuggestCaches();
+  wireManualHitHints();
 
-    await loadSuggestCaches();
-    wireManualHitHints();
+  // 2) 載入 profile
+  const profile = await loadProfile(user.id);
+  logDebug("profile loaded", { userId: user.id, profile });
 
-    const profile = await loadProfile(user.id);
-logDebug("profile loaded", { userId: user.id, profile });
-
-const displayName = (profile?.display_name || "").trim();
-
-// ✅ 永遠顯示 display_name（真的沒有才 fallback）
-if (helloLineEl) {
-  helloLineEl.textContent = `Hello，${displayName || "（未設定姓名）"}`;
-}
-
-
-helloLineEl.textContent = `Hello，${showName}`;
-    await loadZenQuote();
-
-    const dateEl = document.getElementById("entry-date");
-    if (dateEl && !dateEl.value) dateEl.value = formatDate(new Date());
-
-    await loadLedger();
-
-    if (parseTextBtn) parseTextBtn.addEventListener("click", parseTextInput);
-    if (voiceTextClearBtn) voiceTextClearBtn.addEventListener("click", clearVoiceText);
-    if (voiceClearBtn) voiceClearBtn.addEventListener("click", clearVoiceEntries);
-    if (voiceConfirmBtn) voiceConfirmBtn.addEventListener("click", confirmVoiceEntries);
-
-    renderVoicePreview();
+  // 3) 設定 Hello（只做一次）
+  const displayName = (profile?.display_name || "").trim();
+  if (helloLineEl) {
+    helloLineEl.textContent = displayName
+      ? `Hello，${displayName}`
+      : "Hello，（未設定姓名）";
   }
+
+  // 4) 載入自在語（一定要在 Hello 後）
+  await loadZenQuote();
+
+  // 5) 預設日期
+  const dateEl = document.getElementById("entry-date");
+  if (dateEl && !dateEl.value) {
+    dateEl.value = formatDate(new Date());
+  }
+
+  // 6) 載入記帳列表
+  await loadLedger();
+
+  // 7) 綁定事件
+  if (parseTextBtn) parseTextBtn.addEventListener("click", parseTextInput);
+  if (voiceTextClearBtn) voiceTextClearBtn.addEventListener("click", clearVoiceText);
+  if (voiceClearBtn) voiceClearBtn.addEventListener("click", clearVoiceEntries);
+  if (voiceConfirmBtn) voiceConfirmBtn.addEventListener("click", confirmVoiceEntries);
+
+  renderVoicePreview();
+}
 });
