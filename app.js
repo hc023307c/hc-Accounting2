@@ -814,7 +814,8 @@ function dateFromOffset(daysAgo) {
 function extractDate(seg) {
   let rest = seg;
 
-  let m = rest.match(/(\d{4})年(\d{1,2})月(\d{1,2})日?/);
+  // 0) YYYY/MM/DD or YYYY-M-D
+  let m = rest.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
   if (m) {
     const y = parseInt(m[1], 10);
     const mo = String(parseInt(m[2], 10)).padStart(2, "0");
@@ -823,6 +824,28 @@ function extractDate(seg) {
     return { dateStr: `${y}-${mo}-${da}`, rest };
   }
 
+  // 1) YYYY年M月D日
+  m = rest.match(/(\d{4})年(\d{1,2})月(\d{1,2})日?/);
+  if (m) {
+    const y = parseInt(m[1], 10);
+    const mo = String(parseInt(m[2], 10)).padStart(2, "0");
+    const da = String(parseInt(m[3], 10)).padStart(2, "0");
+    rest = rest.replace(m[0], " ");
+    return { dateStr: `${y}-${mo}-${da}`, rest };
+  }
+
+  // 2) M/D or M-D（年取今年）✅你現在缺的就是這個
+  m = rest.match(/(\d{1,2})[\/\-](\d{1,2})/);
+  if (m) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const mo = String(parseInt(m[1], 10)).padStart(2, "0");
+    const da = String(parseInt(m[2], 10)).padStart(2, "0");
+    rest = rest.replace(m[0], " ");
+    return { dateStr: `${y}-${mo}-${da}`, rest };
+  }
+
+  // 3) M月D日（年取今年）
   m = rest.match(/(\d{1,2})月(\d{1,2})日?/);
   if (m) {
     const now = new Date();
@@ -833,6 +856,7 @@ function extractDate(seg) {
     return { dateStr: `${y}-${mo}-${da}`, rest };
   }
 
+  // 4) 今天 / 昨天 / 前天
   if (rest.includes("前天")) {
     rest = rest.replace("前天", " ");
     return { dateStr: dateFromOffset(2), rest };
@@ -846,8 +870,10 @@ function extractDate(seg) {
     return { dateStr: dateFromOffset(0), rest };
   }
 
+  // 5) 都沒抓到 → 預設今天
   return { dateStr: dateFromOffset(0), rest };
 }
+
 
 // 支援 B：地點關鍵字：「在全聯」或「地點全聯」或「地點:全聯」
 function extractPlaceKeyword(seg) {
