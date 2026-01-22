@@ -1,0 +1,1109 @@
+// ===============================
+// 0) Supabase 設定
+// ===============================
+const SUPABASE_URL = "https://kjcxngzrrncotukoxbze.supabase.co";
+const SUPABASE_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtqY3huZ3pycm5jb3R1a294YnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg5ODg1NjEsImV4cCI6MjA4NDU2NDU2MX0.MgYNIEhW9v5dempDoFSvoM5foom5ST8t9hkx_0_qHvo";
+
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ===============================
+// 1) Debug
+// ===============================
+const jsStatusEl = document.getElementById("js-status");
+const debugEl = document.getElementById("debug");
+
+function logDebug(msg, obj) {
+  if (!debugEl) return;
+  const text = msg + (obj ? " " + JSON.stringify(obj, null, 2) : "");
+  debugEl.textContent += text + "\n";
+  console.log("[DEBUG]", msg, obj || "");
+}
+
+if (jsStatusEl) jsStatusEl.textContent = "✅ JS 已載入，Supabase client 建立完成。";
+
+// page markers
+const isIndexPage = document.getElementById("index-page") !== null;
+const isLedgerPage = document.getElementById("ledger-page") !== null;
+
+// index DOM
+const authStatusEl = document.getElementById("auth-status");
+
+// ledger DOM
+const helloLineEl = document.getElementById("hello-line");
+const zenLineEl = document.getElementById("zen-line");
+const editStatusEl = document.getElementById("edit-status");
+const entrySubmitBtn = document.getElementById("entry-submit-btn");
+const entryCancelEditBtn = document.getElementById("entry-cancel-edit-btn");
+const ledgerTbodyEl = document.getElementById("ledger-tbody");
+
+// manual hint DOM
+const entryCategoryHitEl = document.getElementById("entry-category-hit");
+const entryPlaceHitEl = document.getElementById("entry-place-hit");
+
+// datalist DOM
+const categorySuggestEl = document.getElementById("category-suggest");
+const placeSuggestEl = document.getElementById("place-suggest");
+
+// voice DOM
+const voiceTextInputEl = document.getElementById("voice-text-input");
+const voiceStatusEl = document.getElementById("voice-status");
+const voicePreviewBodyEl = document.getElementById("voice-preview-body");
+const parseTextBtn = document.getElementById("parse-text-btn");
+const voiceTextClearBtn = document.getElementById("voice-text-clear-btn");
+const voiceConfirmBtn = document.getElementById("voice-confirm-btn");
+const voiceClearBtn = document.getElementById("voice-clear-btn");
+
+// ===============================
+// 2) Auth
+// ===============================
+function accountToEmail(account) {
+  return account + "@demo.local";
+}
+
+async function handleLogin() {
+  const accountInput = document.getElementById("login-account");
+  const passwordInput = document.getElementById("login-password");
+  if (!accountInput || !passwordInput) return;
+
+  const account = accountInput.value.trim();
+  const password = passwordInput.value;
+
+  if (!account || !password) {
+    if (authStatusEl) authStatusEl.textContent = "請輸入帳號與密碼";
+    alert("請輸入帳號與密碼");
+    return;
+  }
+
+  const email = accountToEmail(account);
+  logDebug("嘗試登入", { email });
+
+  const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+
+  if (error) {
+    if (authStatusEl) authStatusEl.textContent = "登入失敗：" + error.message;
+    alert("登入失敗：" + error.message);
+    logDebug("登入失敗", error);
+    return;
+  }
+
+  if (authStatusEl) authStatusEl.textContent = "登入成功：" + (data.user?.email || "");
+  location.href = "ledger.html";
+}
+
+async function handleLogout() {
+  await supabaseClient.auth.signOut();
+  location.href = "index.html";
+}
+
+async function getCurrentUser() {
+  const { data, error } = await supabaseClient.auth.getUser();
+  if (error) return null;
+  return data.user || null;
+}
+
+async function loadProfile(userId) {
+  const { data, error } = await supabaseClient
+    .from("profiles")
+    .select("username, role")
+    .eq("id", userId)
+    .single();
+
+  if (error) {
+    logDebug("載入 profile 失敗", error);
+    return null;
+  }
+  return data;
+}
+
+// ===============================
+// 3) Zen Quote（108 自在語）
+// ===============================
+async function loadZenQuote() {
+  if (!zenLineEl) return;
+
+  const { data, error } = await supabaseClient
+    .from("zen_quotes")
+    .select("content, source")
+    .eq("enabled", true)
+    .limit(200);
+
+  if (error) {
+    zenLineEl.textContent = "（自在語載入失敗）";
+    logDebug("zen_quotes error", error);
+    return;
+  }
+
+  if (!data || !data.length) {
+    zenLineEl.textContent = "（目前沒有自在語）";
+    return;
+  }
+
+  const pick = data[Math.floor(Math.random() * data.length)];
+  zenLineEl.textContent = `「${pick.content}」${pick.source ? " — " + pick.source : ""}`;
+}
+
+// ===============================
+// 4) 日期工具
+// ===============================
+function formatDate(d) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+// ===============================
+// 5) Autocomplete 快取（分類/地點 + 同義詞）
+// ===============================
+/**
+ * 目標：
+ * - voice 解析 / 預覽即時命中不用一直打 DB
+ * - 手動輸入顯示「✅命中 / ⚠未命中」並提供 datalist 提示
+ */
+const categoryTextToId = new Map(); // key: anyText(name or synonym) -> category_id
+const categoryIdToName = new Map(); // id -> canonical name
+const placeTextToId = new Map();    // key: anyText(name or synonym) -> place_id
+const placeIdToName = new Map();    // id -> canonical name
+
+let suggestCategories = []; // datalist 顯示用（去重）
+let suggestPlaces = [];     // datalist 顯示用（去重）
+
+function normKey(s) {
+  return (s || "").trim().toLowerCase();
+}
+
+function setHint(el, ok, text) {
+  if (!el) return;
+  el.classList.remove("ok", "warn");
+  if (!text) {
+    el.textContent = "";
+    return;
+  }
+  el.textContent = text;
+  el.classList.add(ok ? "ok" : "warn");
+}
+
+async function loadSuggestCaches() {
+  // ---- categories
+  {
+    const { data: cats, error } = await supabaseClient
+      .from("categories")
+      .select("id, name")
+      .limit(1000);
+
+    if (error) {
+      logDebug("load categories error", error);
+    } else {
+      for (const c of cats || []) {
+        categoryIdToName.set(c.id, c.name);
+        categoryTextToId.set(normKey(c.name), c.id);
+      }
+    }
+  }
+
+  // ---- category_synonyms
+  {
+    const { data: syns, error } = await supabaseClient
+      .from("category_synonyms")
+      .select("category_id, synonym")
+      .limit(3000);
+
+    if (error) {
+      logDebug("load category_synonyms error", error);
+    } else {
+      for (const s of syns || []) {
+        if (!s.synonym || !s.category_id) continue;
+        categoryTextToId.set(normKey(s.synonym), s.category_id);
+      }
+    }
+  }
+
+  // ---- places
+  {
+    const { data: places, error } = await supabaseClient
+      .from("places")
+      .select("id, name")
+      .limit(1000);
+
+    if (error) {
+      logDebug("load places error", error);
+    } else {
+      for (const p of places || []) {
+        placeIdToName.set(p.id, p.name);
+        placeTextToId.set(normKey(p.name), p.id);
+      }
+    }
+  }
+
+  // ---- place_synonyms
+  {
+    const { data: ps, error } = await supabaseClient
+      .from("place_synonyms")
+      .select("place_id, synonym")
+      .limit(3000);
+
+    if (error) {
+      logDebug("load place_synonyms error", error);
+    } else {
+      for (const s of ps || []) {
+        if (!s.synonym || !s.place_id) continue;
+        placeTextToId.set(normKey(s.synonym), s.place_id);
+      }
+    }
+  }
+
+  // ---- datalist items（顯示「名稱 + 常用同義詞」會很長，所以 datalist 用「名稱」為主）
+  suggestCategories = Array.from(new Set(Array.from(categoryIdToName.values()))).sort();
+  suggestPlaces = Array.from(new Set(Array.from(placeIdToName.values()))).sort();
+
+  renderDatalist(categorySuggestEl, suggestCategories);
+  renderDatalist(placeSuggestEl, suggestPlaces);
+
+  logDebug("Suggest caches loaded", {
+    categories: suggestCategories.length,
+    places: suggestPlaces.length,
+    categoryTextToId: categoryTextToId.size,
+    placeTextToId: placeTextToId.size,
+  });
+}
+
+function renderDatalist(datalistEl, items) {
+  if (!datalistEl) return;
+  datalistEl.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  for (const it of items.slice(0, 1000)) {
+    const opt = document.createElement("option");
+    opt.value = it;
+    frag.appendChild(opt);
+  }
+  datalistEl.appendChild(frag);
+}
+
+function resolveCategoryIdFast(text) {
+  const key = normKey(text);
+  if (!key) return null;
+  return categoryTextToId.get(key) || null;
+}
+
+function resolvePlaceIdFast(text) {
+  const key = normKey(text);
+  if (!key) return null;
+  return placeTextToId.get(key) || null;
+}
+
+function getCategoryNameById(id) {
+  return categoryIdToName.get(id) || "";
+}
+
+function getPlaceNameById(id) {
+  return placeIdToName.get(id) || "";
+}
+
+// 手動輸入即時提示（不會改資料，只顯示命中）
+function wireManualHitHints() {
+  const catInput = document.getElementById("entry-category");
+  const placeInput = document.getElementById("entry-place");
+
+  if (catInput) {
+    catInput.addEventListener("input", () => {
+      const id = resolveCategoryIdFast(catInput.value);
+      if (id) setHint(entryCategoryHitEl, true, `✅ 命中：${getCategoryNameById(id)}`);
+      else if (catInput.value.trim()) setHint(entryCategoryHitEl, false, "⚠ 未命中（送出時會建立自訂分類）");
+      else setHint(entryCategoryHitEl, true, "");
+    });
+  }
+
+  if (placeInput) {
+    placeInput.addEventListener("input", () => {
+      const id = resolvePlaceIdFast(placeInput.value);
+      if (id) setHint(entryPlaceHitEl, true, `✅ 命中：${getPlaceNameById(id)}`);
+      else if (placeInput.value.trim()) setHint(entryPlaceHitEl, false, "⚠ 未命中（送出時會建立自訂地點）");
+      else setHint(entryPlaceHitEl, true, "");
+    });
+  }
+}
+
+// ===============================
+// 6) ✅ 自訂分類/地點建立（僅限手動表單）
+// ===============================
+async function ensureCategorySynonym(categoryId, synonym) {
+  const s = (synonym || "").trim();
+  if (!categoryId || !s) return;
+
+  const { data, error } = await supabaseClient
+    .from("category_synonyms")
+    .select("id")
+    .eq("category_id", categoryId)
+    .eq("synonym", s)
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data?.id) return;
+
+  const { error: insErr } = await supabaseClient
+    .from("category_synonyms")
+    .insert({ category_id: categoryId, synonym: s });
+
+  if (insErr) logDebug("ensureCategorySynonym insert error", insErr);
+}
+
+async function ensurePlaceSynonym(placeId, synonym) {
+  const s = (synonym || "").trim();
+  if (!placeId || !s) return;
+
+  const { data, error } = await supabaseClient
+    .from("place_synonyms")
+    .select("id")
+    .eq("place_id", placeId)
+    .eq("synonym", s)
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data?.id) return;
+
+  const { error: insErr } = await supabaseClient
+    .from("place_synonyms")
+    .insert({ place_id: placeId, synonym: s });
+
+  if (insErr) logDebug("ensurePlaceSynonym insert error", insErr);
+}
+
+async function createCustomCategory(userId, name, type) {
+  const n = (name || "").trim();
+  if (!userId || !n) return null;
+
+  const payload = {
+    user_id: userId,
+    name: n,
+    type: type === "income" ? "income" : "expense",
+    grp: null,
+    is_builtin: false,
+  };
+
+  const { data, error } = await supabaseClient
+    .from("categories")
+    .insert(payload)
+    .select("id, name")
+    .single();
+
+  if (error) {
+    logDebug("createCustomCategory error", error);
+    return null;
+  }
+
+  // 更新快取
+  categoryIdToName.set(data.id, data.name);
+  categoryTextToId.set(normKey(data.name), data.id);
+  suggestCategories = Array.from(new Set(Array.from(categoryIdToName.values()))).sort();
+  renderDatalist(categorySuggestEl, suggestCategories);
+
+  return data?.id || null;
+}
+
+async function createCustomPlace(userId, name) {
+  const n = (name || "").trim();
+  if (!userId || !n) return null;
+
+  const payload = {
+    user_id: userId,
+    name: n,
+    kind: null,
+    is_builtin: false,
+    source: "manual",
+  };
+
+  const { data, error } = await supabaseClient
+    .from("places")
+    .insert(payload)
+    .select("id, name")
+    .single();
+
+  if (error) {
+    logDebug("createCustomPlace error", error);
+    return null;
+  }
+
+  // 更新快取
+  placeIdToName.set(data.id, data.name);
+  placeTextToId.set(normKey(data.name), data.id);
+  suggestPlaces = Array.from(new Set(Array.from(placeIdToName.values()))).sort();
+  renderDatalist(placeSuggestEl, suggestPlaces);
+
+  return data?.id || null;
+}
+
+async function resolveOrCreateCategoryIdForManual(userId, catText, type) {
+  const text = (catText || "").trim();
+  if (!text) return null;
+
+  let id = resolveCategoryIdFast(text);
+  if (id) {
+    await ensureCategorySynonym(id, text);
+    categoryTextToId.set(normKey(text), id); // 補強快取
+    return id;
+  }
+
+  id = await createCustomCategory(userId, text, type);
+  if (!id) return null;
+
+  await ensureCategorySynonym(id, text);
+  categoryTextToId.set(normKey(text), id);
+  return id;
+}
+
+async function resolveOrCreatePlaceIdForManual(userId, placeText) {
+  const text = (placeText || "").trim();
+  if (!text) return null;
+
+  let id = resolvePlaceIdFast(text);
+  if (id) {
+    await ensurePlaceSynonym(id, text);
+    placeTextToId.set(normKey(text), id);
+    return id;
+  }
+
+  id = await createCustomPlace(userId, text);
+  if (!id) return null;
+
+  await ensurePlaceSynonym(id, text);
+  placeTextToId.set(normKey(text), id);
+  return id;
+}
+
+// ===============================
+// 7) Ledger：列表 + 編輯/刪除
+// ===============================
+let ledgerRows = [];
+let editingEntryId = null;
+let isSubmittingEntry = false;
+
+async function loadLedger() {
+  if (!ledgerTbodyEl) return;
+
+  const user = await getCurrentUser();
+  if (!user) {
+    ledgerTbodyEl.innerHTML = '<tr><td colspan="7">請先登入</td></tr>';
+    location.href = "index.html";
+    return;
+  }
+
+  ledgerTbodyEl.innerHTML = '<tr><td colspan="7">載入中...</td></tr>';
+
+  const { data, error } = await supabaseClient
+    .from("ledger_entries")
+    .select(`
+      id,
+      occurred_at,
+      type,
+      amount,
+      item,
+      category_id,
+      place_id,
+      categories(name),
+      places(name)
+    `)
+    .order("occurred_at", { ascending: false })
+    .order("id", { ascending: false });
+
+  if (error) {
+    ledgerTbodyEl.innerHTML = `<tr><td colspan="7">載入失敗：${error.message}</td></tr>`;
+    logDebug("loadLedger error", error);
+    return;
+  }
+
+  ledgerRows = data || [];
+  if (!ledgerRows.length) {
+    ledgerTbodyEl.innerHTML = '<tr><td colspan="7">目前沒有記帳資料</td></tr>';
+    return;
+  }
+
+  ledgerTbodyEl.innerHTML = "";
+  for (const r of ledgerRows) {
+    const typeLabel =
+      r.type === "income"
+        ? '<span class="badge-income">收入</span>'
+        : '<span class="badge-expense">支出</span>';
+
+    const catName = r.categories?.name || "";
+    const placeName = r.places?.name || "";
+
+    ledgerTbodyEl.innerHTML += `
+      <tr>
+        <td>${r.occurred_at}</td>
+        <td>${typeLabel}</td>
+        <td>${escapeHtml(catName)}</td>
+        <td>${escapeHtml(r.item || "")}</td>
+        <td>${r.amount}</td>
+        <td>${escapeHtml(placeName)}</td>
+        <td>
+          <button type="button" class="btn-secondary" onclick="startEditEntry('${r.id}')">編輯</button>
+          <button type="button" class="btn-secondary" onclick="deleteEntry('${r.id}')">刪除</button>
+        </td>
+      </tr>
+    `;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function fillFormForRow(row) {
+  const dateEl = document.getElementById("entry-date");
+  const typeEl = document.getElementById("entry-type");
+  const catEl = document.getElementById("entry-category");
+  const itemEl = document.getElementById("entry-item");
+  const amtEl = document.getElementById("entry-amount");
+  const placeEl = document.getElementById("entry-place");
+
+  if (dateEl) dateEl.value = row.occurred_at;
+  if (typeEl) typeEl.value = row.type;
+  if (catEl) catEl.value = row.categories?.name || "";
+  if (itemEl) itemEl.value = row.item || "";
+  if (amtEl) amtEl.value = row.amount;
+  if (placeEl) placeEl.value = row.places?.name || "";
+}
+
+function clearForm() {
+  const dateEl = document.getElementById("entry-date");
+  const typeEl = document.getElementById("entry-type");
+  const catEl = document.getElementById("entry-category");
+  const itemEl = document.getElementById("entry-item");
+  const amtEl = document.getElementById("entry-amount");
+  const placeEl = document.getElementById("entry-place");
+
+  if (dateEl) dateEl.value = formatDate(new Date());
+  if (typeEl) typeEl.value = "expense";
+  if (catEl) catEl.value = "";
+  if (itemEl) itemEl.value = "";
+  if (amtEl) amtEl.value = "";
+  if (placeEl) placeEl.value = "";
+
+  setHint(entryCategoryHitEl, true, "");
+  setHint(entryPlaceHitEl, true, "");
+}
+
+function startEditEntry(id) {
+  const row = ledgerRows.find((r) => r.id === id);
+  if (!row) return;
+
+  editingEntryId = id;
+  fillFormForRow(row);
+
+  if (editStatusEl) {
+    editStatusEl.textContent = `正在編輯：${row.occurred_at} / ${row.categories?.name || "未分類"} / ${row.item || ""}（ID: ${id}）`;
+  }
+  if (entrySubmitBtn) entrySubmitBtn.textContent = "儲存修改";
+  if (entryCancelEditBtn) entryCancelEditBtn.classList.remove("hidden");
+}
+
+function cancelEditEntry() {
+  editingEntryId = null;
+  clearForm();
+
+  if (editStatusEl) editStatusEl.textContent = "";
+  if (entrySubmitBtn) entrySubmitBtn.textContent = "新增記帳";
+  if (entryCancelEditBtn) entryCancelEditBtn.classList.add("hidden");
+}
+
+async function submitEntry() {
+  const user = await getCurrentUser();
+  if (!user) {
+    alert("請先登入");
+    location.href = "index.html";
+    return;
+  }
+
+  if (isSubmittingEntry) return;
+  isSubmittingEntry = true;
+
+  try {
+    if (entrySubmitBtn) {
+      entrySubmitBtn.disabled = true;
+      entrySubmitBtn.textContent = editingEntryId ? "儲存中..." : "新增中...";
+    }
+
+    const date = document.getElementById("entry-date")?.value;
+    const type = document.getElementById("entry-type")?.value || "expense";
+    const catText = document.getElementById("entry-category")?.value?.trim() || "";
+    const item = document.getElementById("entry-item")?.value?.trim() || "";
+    const amountStr = document.getElementById("entry-amount")?.value;
+    const placeText = document.getElementById("entry-place")?.value?.trim() || "";
+
+    if (!date || !amountStr) return alert("請至少填寫日期與金額");
+
+    const amount = parseFloat(amountStr);
+    if (!Number.isFinite(amount) || amount <= 0) return alert("金額需為正數");
+
+    // ✅ 手動輸入：分類/地點查不到就建立自訂項 + synonym
+    const category_id = await resolveOrCreateCategoryIdForManual(user.id, catText, type);
+    const place_id = await resolveOrCreatePlaceIdForManual(user.id, placeText);
+
+    const payload = {
+      occurred_at: date,
+      type,
+      amount,
+      item: item || null,
+      category_id: category_id || null,
+      place_id: place_id || null,
+      source: "manual",
+      updated_at: new Date().toISOString(),
+    };
+
+    let error = null;
+    if (editingEntryId) {
+      ({ error } = await supabaseClient
+        .from("ledger_entries")
+        .update(payload)
+        .eq("id", editingEntryId));
+    } else {
+      ({ error } = await supabaseClient
+        .from("ledger_entries")
+        .insert(payload));
+    }
+
+    if (error) {
+      alert((editingEntryId ? "儲存修改失敗：" : "新增失敗：") + error.message);
+      logDebug("submitEntry error", error);
+      return;
+    }
+
+    cancelEditEntry();
+    await loadLedger();
+  } finally {
+    isSubmittingEntry = false;
+    if (entrySubmitBtn) {
+      entrySubmitBtn.disabled = false;
+      entrySubmitBtn.textContent = editingEntryId ? "儲存修改" : "新增記帳";
+    }
+  }
+}
+
+async function deleteEntry(id) {
+  const ok = confirm("確定要刪除此筆記帳嗎？");
+  if (!ok) return;
+
+  const { error } = await supabaseClient
+    .from("ledger_entries")
+    .delete()
+    .eq("id", id);
+
+  if (error) {
+    alert("刪除失敗：" + error.message);
+    logDebug("delete error", error);
+    return;
+  }
+
+  if (editingEntryId === id) cancelEditEntry();
+  await loadLedger();
+}
+
+// ===============================
+// 8) 語音：解析 + 預覽可編輯（但仍不建立）
+// ===============================
+let pendingVoiceEntries = [];
+let isSubmittingVoice = false;
+
+function normalizeText(s) {
+  if (!s) return "";
+  return s
+    .replace(/[，、。]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function dateFromOffset(daysAgo) {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  return formatDate(d);
+}
+
+function extractDate(seg) {
+  let rest = seg;
+
+  let m = rest.match(/(\d{4})年(\d{1,2})月(\d{1,2})日?/);
+  if (m) {
+    const y = parseInt(m[1], 10);
+    const mo = String(parseInt(m[2], 10)).padStart(2, "0");
+    const da = String(parseInt(m[3], 10)).padStart(2, "0");
+    rest = rest.replace(m[0], " ");
+    return { dateStr: `${y}-${mo}-${da}`, rest };
+  }
+
+  m = rest.match(/(\d{1,2})月(\d{1,2})日?/);
+  if (m) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const mo = String(parseInt(m[1], 10)).padStart(2, "0");
+    const da = String(parseInt(m[2], 10)).padStart(2, "0");
+    rest = rest.replace(m[0], " ");
+    return { dateStr: `${y}-${mo}-${da}`, rest };
+  }
+
+  if (rest.includes("前天")) {
+    rest = rest.replace("前天", " ");
+    return { dateStr: dateFromOffset(2), rest };
+  }
+  if (rest.includes("昨天")) {
+    rest = rest.replace("昨天", " ");
+    return { dateStr: dateFromOffset(1), rest };
+  }
+  if (rest.includes("今天")) {
+    rest = rest.replace("今天", " ");
+    return { dateStr: dateFromOffset(0), rest };
+  }
+
+  return { dateStr: dateFromOffset(0), rest };
+}
+
+// 支援 B：地點關鍵字：「在全聯」或「地點全聯」或「地點:全聯」
+function extractPlaceKeyword(seg) {
+  let placeText = null;
+  let rest = seg;
+
+  const re = /(在|地點)\s*[:：]?\s*([^\s]+)/;
+  const m = rest.match(re);
+  if (m) {
+    placeText = m[2];
+    rest = rest.replace(m[0], " ");
+  }
+  return { placeText, rest };
+}
+
+function extractType(seg) {
+  let rest = seg;
+  if (rest.includes("收入")) {
+    rest = rest.replace("收入", " ");
+    return { type: "income", rest };
+  }
+  if (rest.includes("支出")) {
+    rest = rest.replace("支出", " ");
+    return { type: "expense", rest };
+  }
+  return { type: null, rest };
+}
+
+// 取「最後出現的數字」當金額
+function extractAmount(seg) {
+  const matches = [...seg.matchAll(/(\d+(\.\d+)?)/g)];
+  if (!matches.length) return { amount: null, rest: seg };
+
+  const last = matches[matches.length - 1];
+  const amount = parseFloat(last[1]);
+  const rest = seg.replace(last[0], " ");
+  return { amount, rest };
+}
+
+// 解析一段：日期 類型 分類 項目 金額 地點(可用關鍵字)
+function parseOneVoiceSegment(raw) {
+  const seg0 = normalizeText(raw);
+  if (!seg0) return null;
+
+  const { placeText, rest: seg1 } = extractPlaceKeyword(seg0);
+  const { dateStr, rest: seg2 } = extractDate(seg1);
+  const { type, rest: seg3 } = extractType(seg2);
+  if (!type) return null;
+
+  const { amount, rest: seg4 } = extractAmount(seg3);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  const tokens = normalizeText(seg4).split(" ").filter(Boolean);
+  const categoryText = tokens[0] || "";
+  const itemText = tokens.slice(1).join(" ") || "";
+
+  return {
+    occurred_at: dateStr,
+    type,
+    categoryText,
+    itemText,
+    amount,
+    placeText: placeText || "",
+  };
+}
+
+function parseVoiceTextToEntries(rawText) {
+  const entries = [];
+  if (!rawText) return entries;
+
+  const parts = rawText.replace(/\r/g, "\n").split(/下一筆|下ㄧ筆|下一笔/);
+  for (const p of parts) {
+    const e = parseOneVoiceSegment(p);
+    if (e) entries.push(e);
+  }
+  return entries;
+}
+
+function calcHitStatus(e) {
+  const cId = resolveCategoryIdFast(e.categoryText);
+  const pId = resolvePlaceIdFast(e.placeText);
+  return {
+    categoryOk: !!cId || !e.categoryText.trim(),
+    placeOk: !!pId || !e.placeText.trim(),
+    categoryId: cId,
+    placeId: pId,
+  };
+}
+
+function renderVoicePreview() {
+  if (!voicePreviewBodyEl) return;
+
+  if (!pendingVoiceEntries.length) {
+    voicePreviewBodyEl.innerHTML = '<tr><td colspan="9">尚無語音解析資料</td></tr>';
+    if (voiceConfirmBtn) voiceConfirmBtn.disabled = true;
+    if (voiceClearBtn) voiceClearBtn.disabled = true;
+    return;
+  }
+
+  if (voiceConfirmBtn) voiceConfirmBtn.disabled = false;
+  if (voiceClearBtn) voiceClearBtn.disabled = false;
+
+  voicePreviewBodyEl.innerHTML = "";
+
+  pendingVoiceEntries.forEach((e, idx) => {
+    const typeLabel = e.type === "income" ? "收入" : "支出";
+
+    const hit = calcHitStatus(e);
+    const hitText = (hit.categoryOk ? "分類✅" : "分類⚠") + " / " + (hit.placeOk ? "地點✅" : "地點⚠");
+    const hitCls = (hit.categoryOk && hit.placeOk) ? "hit-ok" : "hit-warn";
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${idx + 1}</td>
+      <td>${e.occurred_at}</td>
+      <td>${typeLabel}</td>
+
+      <td>
+        <input class="table-input" data-idx="${idx}" data-field="categoryText" list="category-suggest" value="${escapeHtml(e.categoryText)}" />
+      </td>
+
+      <td>
+        <input class="table-input" data-idx="${idx}" data-field="itemText" value="${escapeHtml(e.itemText)}" />
+      </td>
+
+      <td>
+        <input class="table-input" data-idx="${idx}" data-field="amount" inputmode="numeric" value="${e.amount}" />
+      </td>
+
+      <td>
+        <input class="table-input" data-idx="${idx}" data-field="placeText" list="place-suggest" value="${escapeHtml(e.placeText)}" />
+      </td>
+
+      <td class="${hitCls}">${hitText}</td>
+
+      <td>
+        <button type="button" class="btn-secondary" onclick="removeVoiceEntry(${idx})">刪除</button>
+      </td>
+    `;
+
+    voicePreviewBodyEl.appendChild(tr);
+  });
+
+  // 綁 input 事件（用事件委派）
+  bindVoicePreviewInputs();
+}
+
+let voicePreviewBound = false;
+function bindVoicePreviewInputs() {
+  if (voicePreviewBound || !voicePreviewBodyEl) return;
+  voicePreviewBound = true;
+
+  voicePreviewBodyEl.addEventListener("input", (ev) => {
+    const t = ev.target;
+    if (!(t instanceof HTMLInputElement)) return;
+
+    const idx = parseInt(t.getAttribute("data-idx"), 10);
+    const field = t.getAttribute("data-field");
+    if (!Number.isFinite(idx) || idx < 0 || idx >= pendingVoiceEntries.length) return;
+    if (!field) return;
+
+    if (field === "amount") {
+      const v = parseFloat(t.value);
+      pendingVoiceEntries[idx].amount = Number.isFinite(v) ? v : pendingVoiceEntries[idx].amount;
+    } else {
+      pendingVoiceEntries[idx][field] = t.value;
+    }
+
+    // 重新渲染命中欄（只更新整表最省心）
+    // 若你想極致效能，下一版可改成只更新該列命中欄。
+    renderVoicePreview();
+    voicePreviewBound = false; // render 後 DOM 重建，需重綁
+  }, { passive: true });
+}
+
+function removeVoiceEntry(index) {
+  if (index < 0 || index >= pendingVoiceEntries.length) return;
+  pendingVoiceEntries.splice(index, 1);
+  voicePreviewBound = false;
+  renderVoicePreview();
+  if (voiceStatusEl) voiceStatusEl.textContent = `已刪除一筆，目前剩 ${pendingVoiceEntries.length} 筆。`;
+}
+
+function parseTextInput() {
+  if (!voiceTextInputEl) return;
+  const text = voiceTextInputEl.value.trim();
+  if (!text) return alert("請先輸入/貼上語音文字");
+
+  const newEntries = parseVoiceTextToEntries(text);
+  if (!newEntries.length) {
+    if (voiceStatusEl) voiceStatusEl.textContent = "⚠ 無法解析，請用「日期 類型 分類 項目 金額（在地點/地點xxx）」格式。";
+    return;
+  }
+
+  pendingVoiceEntries.push(...newEntries);
+  voicePreviewBound = false;
+  renderVoicePreview();
+
+  // 顯示命中統計
+  let catOk = 0, placeOk = 0;
+  for (const e of pendingVoiceEntries) {
+    const hit = calcHitStatus(e);
+    if (hit.categoryOk) catOk++;
+    if (hit.placeOk) placeOk++;
+  }
+
+  if (voiceStatusEl) {
+    voiceStatusEl.textContent =
+      `✅ 解析新增 ${newEntries.length} 筆，目前暫存 ${pendingVoiceEntries.length} 筆。` +
+      `（分類命中 ${catOk}/${pendingVoiceEntries.length}，地點命中 ${placeOk}/${pendingVoiceEntries.length}）`;
+  }
+}
+
+function clearVoiceText() {
+  if (!voiceTextInputEl) return;
+  voiceTextInputEl.value = "";
+  if (voiceStatusEl) voiceStatusEl.textContent = "已清空文字輸入區。";
+}
+
+function clearVoiceEntries() {
+  pendingVoiceEntries = [];
+  voicePreviewBound = false;
+  renderVoicePreview();
+  if (voiceStatusEl) voiceStatusEl.textContent = "已清除所有暫存資料。";
+}
+
+async function confirmVoiceEntries() {
+  const user = await getCurrentUser();
+  if (!user) {
+    alert("請先登入");
+    location.href = "index.html";
+    return;
+  }
+
+  if (!pendingVoiceEntries.length) return alert("目前沒有暫存資料");
+
+  if (isSubmittingVoice) return;
+  isSubmittingVoice = true;
+
+  if (voiceConfirmBtn) {
+    voiceConfirmBtn.disabled = true;
+    voiceConfirmBtn.textContent = "送出中...";
+  }
+
+  try {
+    const ok = confirm(`確定送出 ${pendingVoiceEntries.length} 筆語音記帳嗎？`);
+    if (!ok) return;
+
+    const payloads = [];
+    for (const e of pendingVoiceEntries) {
+      const category_id = resolveCategoryIdFast(e.categoryText) || null;
+      const place_id = resolvePlaceIdFast(e.placeText) || null;
+
+      // ✅ 保守策略：對不到就不建，塞回 item 以免資訊消失
+      let finalItem = (e.itemText || "").trim();
+
+      if (!category_id && e.categoryText.trim()) {
+        finalItem = `${finalItem} [分類:${e.categoryText.trim()}]`.trim();
+      }
+      if (!place_id && e.placeText.trim()) {
+        finalItem = `${finalItem} [地點:${e.placeText.trim()}]`.trim();
+      }
+
+      // amount 再做一次保護
+      const amount = parseFloat(e.amount);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+
+      payloads.push({
+        occurred_at: e.occurred_at,
+        type: e.type,
+        amount,
+        item: finalItem || null,
+        category_id,
+        place_id,
+        source: "speech",
+      });
+    }
+
+    if (!payloads.length) {
+      alert("沒有可送出的有效資料（請檢查金額/格式）");
+      return;
+    }
+
+    const { error } = await supabaseClient.from("ledger_entries").insert(payloads);
+    if (error) {
+      alert("語音寫入失敗：" + error.message);
+      logDebug("voice insert error", error);
+      return;
+    }
+
+    pendingVoiceEntries = [];
+    voicePreviewBound = false;
+    renderVoicePreview();
+    if (voiceStatusEl) voiceStatusEl.textContent = "✅ 語音記帳已寫入成功。";
+    await loadLedger();
+  } finally {
+    isSubmittingVoice = false;
+    if (voiceConfirmBtn) {
+      voiceConfirmBtn.disabled = false;
+      voiceConfirmBtn.textContent = "✅ 確認送出";
+    }
+  }
+}
+
+// ===============================
+// 9) 初始化
+// ===============================
+document.addEventListener("DOMContentLoaded", async () => {
+  logDebug("page loaded");
+
+  if (isIndexPage) {
+    const user = await getCurrentUser();
+    if (user) location.href = "ledger.html";
+    return;
+  }
+
+  if (isLedgerPage) {
+    const user = await getCurrentUser();
+    if (!user) {
+      location.href = "index.html";
+      return;
+    }
+
+    // 先載 Suggest caches（voice + autocomplete 都會用）
+    await loadSuggestCaches();
+    wireManualHitHints();
+
+    const profile = await loadProfile(user.id);
+    const username = profile?.username || user.email || "使用者";
+    if (helloLineEl) helloLineEl.textContent = `Hello，${username}`;
+
+    await loadZenQuote();
+
+    const dateEl = document.getElementById("entry-date");
+    if (dateEl && !dateEl.value) dateEl.value = formatDate(new Date());
+
+    await loadLedger();
+
+    if (parseTextBtn) parseTextBtn.addEventListener("click", parseTextInput);
+    if (voiceTextClearBtn) voiceTextClearBtn.addEventListener("click", clearVoiceText);
+    if (voiceClearBtn) voiceClearBtn.addEventListener("click", clearVoiceEntries);
+    if (voiceConfirmBtn) voiceConfirmBtn.addEventListener("click", confirmVoiceEntries);
+
+    renderVoicePreview();
+  }
+});
