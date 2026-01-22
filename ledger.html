@@ -2,7 +2,6 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>HC 記帳系統 - 記帳</title>
   <link rel="stylesheet" href="style.css" />
   <!-- Supabase JS CDN -->
@@ -16,7 +15,10 @@
     <header class="header-row">
       <div>
         <h1 class="title">HC 記帳系統</h1>
-        <div id="hello-bar" class="small text-gray">讀取中…</div>
+        <div class="hello-wrap">
+          <div id="hello-line" class="hello-line">Hello，載入中…</div>
+          <div id="zen-line" class="zen-line">自在語載入中…</div>
+        </div>
       </div>
       <div class="header-actions">
         <button type="button" class="btn-secondary" onclick="handleLogout()">登出</button>
@@ -25,10 +27,13 @@
 
     <p id="js-status" class="small text-green">JS 載入中…</p>
 
+    <!-- ✅ Autocomplete：分類 / 地點 datalist（整站共用） -->
+    <datalist id="category-suggest"></datalist>
+    <datalist id="place-suggest"></datalist>
+
     <!-- 新增 / 編輯 記帳表單 -->
     <section class="section" id="ledger-input">
       <h2 class="section-title">新增 / 編輯 記帳</h2>
-
       <p id="edit-status" class="small text-blue"></p>
 
       <div class="form-grid">
@@ -46,25 +51,25 @@
         </div>
 
         <div class="form-row">
-          <label for="entry-category">分類</label>
-          <input id="entry-category" type="text" placeholder="例如：餐飲 / 交通 / 薪資收入" list="category-list" />
-          <datalist id="category-list"></datalist>
+          <label for="entry-category">分類（可直接打，也會提示）</label>
+          <input id="entry-category" type="text" list="category-suggest" placeholder="例如：餐飲 / 交通 / 薪資收入" />
+          <div id="entry-category-hit" class="hint-line"></div>
         </div>
 
         <div class="form-row">
           <label for="entry-item">項目</label>
-          <input id="entry-item" type="text" placeholder="例如：晚餐便當 / 高鐵票 / 一月薪水" />
+          <input id="entry-item" type="text" placeholder="例如：晚餐便當 / 一月薪水" />
         </div>
 
         <div class="form-row">
           <label for="entry-amount">金額</label>
-          <input id="entry-amount" type="number" min="1" step="1" placeholder="例如：250" />
+          <input id="entry-amount" type="number" min="0" step="1" placeholder="例如：250" />
         </div>
 
         <div class="form-row">
-          <label for="entry-place">地點（可不填）</label>
-          <input id="entry-place" type="text" placeholder="例如：全聯 / 7-11 / 星巴克" list="place-list" />
-          <datalist id="place-list"></datalist>
+          <label for="entry-place">地點（可不填，也會提示）</label>
+          <input id="entry-place" type="text" list="place-suggest" placeholder="例如：全聯 / 7-11 / 星巴克" />
+          <div id="entry-place-hit" class="hint-line"></div>
         </div>
       </div>
 
@@ -74,21 +79,26 @@
       </div>
     </section>
 
-    <!-- 語音文字輸入版 -->
+    <!-- 語音文字輸入版（保守：不建立分類/地點） -->
     <section class="section" id="voice-section">
       <h2 class="section-title">語音記帳（文字輸入版）</h2>
+
       <p class="small">
-        建議每筆格式：<br/>
+        建議說法（每一筆）：<br/>
         <code>今天 支出 餐飲 晚餐便當 250 在全聯</code><br/>
-        <code>昨天 收入 薪資收入 一月薪水 30000</code><br/>
-        也可用關鍵字：<code>地點全聯</code> / <code>在全聯</code>（兩種都支援）<br/>
-        多筆可用「下一筆」分隔：<br/>
-        <code>今天 支出 餐飲 晚餐便當 250 在全聯 下一筆 昨天 支出 交通 搭車 100</code>
+        <code>昨天 收入 薪資收入 一月薪 30000 地點公司</code><br/>
+        一次講多筆可用「下一筆」分隔：<br/>
+        <code>今天 支出 餐飲 晚餐便當 250 在全聯 下一筆 昨天 支出 交通 搭車 100 在捷運</code>
+      </p>
+
+      <p class="small text-blue">
+        ✅ 這版升級：預覽表格內「分類 / 地點」可以直接改（含 autocomplete），送出時才會真正 resolve 成 ID。<br/>
+        ※ 仍遵守你規則：語音辨識階段「不自動建立」，對不到就把原字串塞回項目，ID 寫 NULL。
       </p>
 
       <div class="form-row">
         <label for="voice-text-input">語音文字輸入區</label>
-        <textarea id="voice-text-input" rows="4" placeholder="貼上語音輸入文字，或直接輸入。"></textarea>
+        <textarea id="voice-text-input" rows="4" placeholder="請將語音輸入的文字貼在這裡，或直接打字。"></textarea>
       </div>
 
       <div class="button-row">
@@ -100,7 +110,7 @@
 
       <p id="voice-status" class="small text-gray">尚未解析任何語音文字。</p>
 
-      <h3 class="section-subtitle">語音解析預覽（按下確認才會寫入資料庫）</h3>
+      <h3 class="section-subtitle">語音解析預覽（可直接修正分類/地點）</h3>
       <div class="table-wrap">
         <table class="table">
           <thead>
@@ -108,15 +118,16 @@
             <th>#</th>
             <th>日期</th>
             <th>類型</th>
-            <th>分類</th>
-            <th>項目</th>
-            <th>金額</th>
-            <th>地點</th>
+            <th>分類（可改）</th>
+            <th>項目（可改）</th>
+            <th>金額（可改）</th>
+            <th>地點（可改）</th>
+            <th>命中</th>
             <th>操作</th>
           </tr>
           </thead>
           <tbody id="voice-preview-body">
-          <tr><td colspan="8">尚無語音解析資料</td></tr>
+            <tr><td colspan="9">尚無語音解析資料</td></tr>
           </tbody>
         </table>
       </div>
@@ -124,20 +135,7 @@
 
     <!-- 記帳紀錄列表 -->
     <section class="section" id="ledger-list">
-      <h2 class="section-title">
-        記帳紀錄
-        <button type="button" class="btn-secondary" style="margin-left:auto;" onclick="exportCsv()">匯出 CSV</button>
-      </h2>
-
-      <div class="small text-gray" style="margin-bottom:6px;">
-        範圍：
-        <input type="date" id="filter-start" />
-        ～
-        <input type="date" id="filter-end" />
-        <button type="button" class="btn-secondary" onclick="applyDateFilter()">套用</button>
-        <button type="button" class="btn-secondary" onclick="quickRange('14d')">最近兩週</button>
-        <button type="button" class="btn-secondary" onclick="quickRange('30d')">最近30天</button>
-      </div>
+      <h2 class="section-title">記帳紀錄</h2>
 
       <div class="table-wrap">
         <table class="table">
@@ -153,37 +151,13 @@
           </tr>
           </thead>
           <tbody id="ledger-tbody">
-          <tr><td colspan="7">載入中...</td></tr>
+            <tr><td colspan="7">載入中...</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <!-- 統計 -->
-    <section class="section" id="stats-section">
-      <h2 class="section-title">統計</h2>
-      <p class="small">
-        總收入：<span id="stat-income" class="text-green">0</span>　
-        總支出：<span id="stat-expense" class="text-red">0</span>　
-        淨額：<span id="stat-net" class="text-blue">0</span>
-      </p>
-
-      <h3 class="section-subtitle">各分類支出合計</h3>
-      <div class="table-wrap">
-        <table class="table">
-          <thead>
-          <tr>
-            <th>分類</th>
-            <th>支出金額</th>
-          </tr>
-          </thead>
-          <tbody id="stats-category-body">
-          <tr><td colspan="2">尚無資料</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
+    <!-- Debug -->
     <section class="section">
       <h2 class="section-title">Debug 訊息</h2>
       <pre id="debug" class="debug-box"></pre>
