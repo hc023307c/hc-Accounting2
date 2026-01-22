@@ -551,6 +551,86 @@ async function loadLedger(startDate, endDate) {
     `;
   }
 }
+// ===============================
+// D) 日期範圍篩選 + 快捷 + CSV 匯出
+// ===============================
+
+function applyDateFilter() {
+  currentFilterStart = filterStartEl?.value || null;
+  currentFilterEnd = filterEndEl?.value || null;
+  loadLedger(currentFilterStart, currentFilterEnd);
+}
+
+// 快捷：一週 / 兩週 / 一個月 / 三個月
+function quickRange(type) {
+  const today = new Date();
+  const endStr = formatDate(today);
+
+  const start = new Date();
+  if (type === "7d") start.setDate(today.getDate() - 7);
+  else if (type === "14d") start.setDate(today.getDate() - 14);
+  else if (type === "30d") start.setDate(today.getDate() - 30);
+  else if (type === "90d") start.setDate(today.getDate() - 90);
+  else start.setDate(today.getDate() - 7);
+
+  const startStr = formatDate(start);
+
+  if (filterStartEl) filterStartEl.value = startStr;
+  if (filterEndEl) filterEndEl.value = endStr;
+
+  currentFilterStart = startStr;
+  currentFilterEnd = endStr;
+
+  loadLedger(startStr, endStr);
+}
+
+// 匯出目前畫面（已套用篩選）的 CSV
+function exportCsv() {
+  if (!ledgerRows || !ledgerRows.length) {
+    alert("目前沒有可以匯出的資料。");
+    return;
+  }
+
+  const header = ["日期", "類型", "分類", "項目", "金額", "地點"];
+  const rows = [header];
+
+  ledgerRows.forEach((r) => {
+    const typeLabel = r.type === "income" ? "收入" : "支出";
+    rows.push([
+      r.occurred_at,
+      typeLabel,
+      r.categories?.name || "",
+      r.item || "",
+      r.amount,
+      r.places?.name || "",
+    ]);
+  });
+
+  const csv = rows
+    .map(cols =>
+      cols.map(v => {
+        const s = String(v ?? "");
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      }).join(",")
+    )
+    .join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+
+  const start = currentFilterStart || "all";
+  const end = currentFilterEnd || "all";
+  const fileName = `ledger_${start}_${end}.csv`;
+
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 
 function escapeHtml(s) {
   return String(s)
