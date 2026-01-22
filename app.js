@@ -50,6 +50,10 @@ const editStatusEl = document.getElementById("edit-status");
 const entrySubmitBtn = document.getElementById("entry-submit-btn");
 const entryCancelEditBtn = document.getElementById("entry-cancel-edit-btn");
 const ledgerTbodyEl = document.getElementById("ledger-tbody");
+// date filter DOM
+const filterStartEl = document.getElementById("filter-start");
+const filterEndEl = document.getElementById("filter-end");
+
 
 // manual hint DOM
 const entryCategoryHitEl = document.getElementById("entry-category-hit");
@@ -470,7 +474,12 @@ let ledgerRows = [];
 let editingEntryId = null;
 let isSubmittingEntry = false;
 
-async function loadLedger() {
+// ✅ 日期篩選狀態（會影響 loadLedger 與 CSV 匯出）
+let currentFilterStart = null;
+let currentFilterEnd = null;
+
+
+async function loadLedger(startDate, endDate) {
   if (!ledgerTbodyEl) return;
 
   const user = await getCurrentUser();
@@ -482,10 +491,9 @@ async function loadLedger() {
 
   ledgerTbodyEl.innerHTML = '<tr><td colspan="7">載入中...</td></tr>';
 
-  const { data, error } = await supabaseClient
+  let q = supabaseClient
     .from("ledger_entries")
-    .select(
-      `
+    .select(`
       id,
       occurred_at,
       type,
@@ -495,10 +503,15 @@ async function loadLedger() {
       place_id,
       categories(name),
       places(name)
-    `
-    )
+    `)
     .order("occurred_at", { ascending: false })
     .order("id", { ascending: false });
+
+  // ✅ 套用日期範圍（只影響當前畫面/CSV匯出）
+  if (startDate) q = q.gte("occurred_at", startDate);
+  if (endDate) q = q.lte("occurred_at", endDate);
+
+  const { data, error } = await q;
 
   if (error) {
     ledgerTbodyEl.innerHTML = `<tr><td colspan="7">載入失敗：${error.message}</td></tr>`;
@@ -515,7 +528,9 @@ async function loadLedger() {
   ledgerTbodyEl.innerHTML = "";
   for (const r of ledgerRows) {
     const typeLabel =
-      r.type === "income" ? '<span class="badge-income">收入</span>' : '<span class="badge-expense">支出</span>';
+      r.type === "income"
+        ? '<span class="badge-income">收入</span>'
+        : '<span class="badge-expense">支出</span>';
 
     const catName = r.categories?.name || "";
     const placeName = r.places?.name || "";
