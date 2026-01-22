@@ -607,15 +607,19 @@ function exportCsv() {
   });
 
   const csv = rows
-    .map(cols =>
-      cols.map(v => {
-        const s = String(v ?? "");
-        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      }).join(",")
+    .map((cols) =>
+      cols
+        .map((v) => {
+          const s = String(v ?? "");
+          return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+        })
+        .join(",")
     )
     .join("\n");
 
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  // ✅ 關鍵：加上 UTF-8 BOM，Excel 才不會亂碼
+  const BOM = "\uFEFF";
+  const blob = new Blob([BOM + csv], { type: "text/csv;charset=utf-8;" });
 
   const start = currentFilterStart || "all";
   const end = currentFilterEnd || "all";
@@ -630,6 +634,7 @@ function exportCsv() {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
 
 
 function escapeHtml(s) {
