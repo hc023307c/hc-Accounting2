@@ -526,20 +526,21 @@ async function loadLedger(startDate, endDate) {
   ledgerTbodyEl.innerHTML = '<tr><td colspan="7">載入中...</td></tr>';
 
   let q = supabaseClient
-    .from("ledger_entries")
-    .select(`
-      id,
-      occurred_at,
-      type,
-      amount,
-      item,
-      category_id,
-      place_id,
-      categories(name),
-      places(name)
-    `)
-    .order("occurred_at", { ascending: false })
-    .order("id", { ascending: false });
+  .from("ledger_entries")
+  .select(`
+    id,
+    occurred_at,
+    type,
+    amount,
+    item,
+    category_id,
+    place_id,
+    categories(name),
+    places(name),
+    profiles(display_name, account_code)
+  `)
+  .order("occurred_at", { ascending: false })
+  .order("id", { ascending: false });
 
   // ✅ 套用日期範圍（只影響當前畫面/CSV匯出）
   if (startDate) q = q.gte("occurred_at", startDate);
@@ -569,20 +570,25 @@ async function loadLedger(startDate, endDate) {
     const catName = r.categories?.name || "";
     const placeName = r.places?.name || "";
 
-    ledgerTbodyEl.innerHTML += `
-      <tr>
-        <td>${r.occurred_at}</td>
-        <td>${typeLabel}</td>
-        <td>${escapeHtml(catName)}</td>
-        <td>${escapeHtml(r.item || "")}</td>
-        <td>${r.amount}</td>
-        <td>${escapeHtml(placeName)}</td>
-        <td>
-          <button type="button" class="btn-secondary" onclick="startEditEntry('${r.id}')">編輯</button>
-          <button type="button" class="btn-secondary" onclick="deleteEntry('${r.id}')">刪除</button>
-        </td>
-      </tr>
-    `;
+    const who = r.profiles
+  ? `${r.profiles.display_name || ""}${r.profiles.account_code ? " (" + r.profiles.account_code + ")" : ""}`.trim()
+  : "";
+
+ledgerTbodyEl.innerHTML += `
+  <tr>
+    <td>${escapeHtml(who)}</td>
+    <td>${r.occurred_at}</td>
+    <td>${typeLabel}</td>
+    <td>${escapeHtml(catName)}</td>
+    <td>${escapeHtml(r.item || "")}</td>
+    <td>${r.amount}</td>
+    <td>${escapeHtml(placeName)}</td>
+    <td>
+      <button type="button" class="btn-secondary" onclick="startEditEntry('${r.id}')">編輯</button>
+      <button type="button" class="btn-secondary" onclick="deleteEntry('${r.id}')">刪除</button>
+    </td>
+  </tr>
+`;
   }
 }
 // ===============================
