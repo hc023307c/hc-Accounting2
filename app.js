@@ -14,11 +14,24 @@ const jsStatusEl = document.getElementById("js-status");
 const debugEl = document.getElementById("debug");
 
 function logDebug(msg, obj) {
-  if (debugEl) {
-    const text = msg + (obj ? " " + JSON.stringify(obj, null, 2) : "");
-    debugEl.textContent += text + "\n";
-  }
+  if (!debugEl) return;
+  const text = msg + (obj ? " " + JSON.stringify(obj, null, 2) : "");
+  debugEl.textContent += text + "\n";
   console.log("[DEBUG]", msg, obj || "");
+}
+
+function logRlsHint(err, tableName) {
+  // 給你快速定位：這不是前端壞，是 RLS / 欄位 / default / policy 的問題
+  if (!err) return;
+  const msg = (err.message || "").toLowerCase();
+  if (msg.includes("row-level security") || err.code === "42501") {
+    logDebug(`⚠ RLS 擋住：${tableName}`, {
+      hint:
+        "這通常代表 policy 的 WITH CHECK 不滿足（例如 insert 時 user_id 沒填、或 policy 要求 user_id=auth.uid()）。" +
+        " 也可能是你表格根本沒有 user_id 欄位，導致 policy 判斷永遠不成立。" +
+        " 下一步要先用 SQL 確認 ledger_entries / category_synonyms / place_synonyms 是否有 user_id 欄位、default、與正確 policy。",
+    });
+  }
 }
 
 if (jsStatusEl) jsStatusEl.textContent = "✅ JS 已載入，Supabase client 建立完成。";
@@ -159,11 +172,11 @@ function formatDate(d) {
 // ===============================
 const categoryTextToId = new Map(); // key: anyText(name or synonym) -> category_id
 const categoryIdToName = new Map(); // id -> canonical name
-const placeTextToId = new Map();    // key: anyText(name or synonym) -> place_id
-const placeIdToName = new Map();    // id -> canonical name
+const placeTextToId = new Map(); // key: anyText(name or synonym) -> place_id
+const placeIdToName = new Map(); // id -> canonical name
 
-let suggestCategories = [];
-let suggestPlaces = [];
+let suggestCategories = []; // datalist 顯示用（去重）
+let suggestPlaces = []; // datalist 顯示用（去重）
 
 function normKey(s) {
   return (s || "").trim().toLowerCase();
@@ -178,6 +191,79 @@ function setHint(el, ok, text) {
   }
   el.textContent = text;
   el.classList.add(ok ? "ok" : "warn");
+}
+
+async function loadSuggestCaches() {
+  // ---- categories
+  {
+    const { data: cats, error } = await supabaseClient.from("categories").select("id, name").limit(1000);
+    if (error) {
+      logDebug("load categories error", error);
+    } else {
+      for (const c of cats || []) {
+        categoryIdToName.set(c.id, c.name);
+        categoryTextToId.set(normKey(c.name), c.id);
+      }
+    }
+  }
+
+  // ---- category_synonyms
+  {
+    const { data: syns, error } = await supabaseClient
+      .from("category_synonyms")
+      .select("category_id, synonym")
+      .limit(3000);
+
+    if (error) {
+      logDebug("load category_synonyms error", error);
+    } else {
+      for (const s of syns || []) {
+        if (!s.synonym || !s.category_id) continue;
+        categoryTextToId.set(normKey(s.synonym), s.category_id);
+      }
+    }
+  }
+
+  // ---- places
+  {
+    const { data: places, error } = await supabaseClient.from("places").select("id, name").limit(1000);
+
+    if (error) {
+      logDebug("load places error", error);
+    } else {
+      for (const p of places || []) {
+        placeIdToName.set(p.id, p.name);
+        placeTextToId.set(normKey(p.name), p.id);
+      }
+    }
+  }
+
+  // ---- place_synonyms
+  {
+    const { data: ps, error } = await supabaseClient.from("place_synonyms").select("place_id, synonym").limit(3000);
+
+    if (error) {
+      logDebug("load place_synonyms error", error);
+    } else {
+      for (const s of ps || []) {
+        if (!s.synonym || !s.place_id) continue;
+        placeTextToId.set(normKey(s.synonym), s.place_id);
+      }
+    }
+  }
+
+  suggestCategories = Array.from(new Set(Array.from(categoryIdToName.values()))).sort();
+  suggestPlaces = Array.from(new Set(Array.from(placeIdToName.values()))).sort();
+
+  renderDatalist(categorySuggestEl, suggestCategories);
+  renderDatalist(placeSuggestEl, suggestPlaces);
+
+  logDebug("Suggest caches loaded", {
+    categories: suggestCategories.length,
+    places: suggestPlaces.length,
+    categoryTextToId: categoryTextToId.size,
+    placeTextToId: placeTextToId.size,
+  });
 }
 
 function renderDatalist(datalistEl, items) {
@@ -236,166 +322,51 @@ function wireManualHitHints() {
   }
 }
 
-// ⭐ 重點：synonyms 現在可能有 user_id 欄位（RLS 需要）
-// 若你的表尚未加 user_id，這裡會自動 fallback（但建議你補欄位）
-async function insertSynonymWithFallback(table, payloadWithUserId, payloadNoUserId) {
-  const { error } = await supabaseClient.from(table).insert(payloadWithUserId);
-  if (!error) return;
-
-  // column 不存在 (42703) 或你還沒改表 → 用舊 payload 再試一次
-  if (String(error.code) === "42703") {
-    logDebug(`${table} no user_id column, fallback insert`, error);
-    const { error: e2 } = await supabaseClient.from(table).insert(payloadNoUserId);
-    if (e2) logDebug(`${table} fallback insert error`, e2);
-    return;
-  }
-
-  // 其他錯誤照樣記錄
-  logDebug(`${table} insert error`, error);
-}
-
-async function loadSuggestCaches() {
-  // 清空（避免重載累積）
-  categoryTextToId.clear();
-  categoryIdToName.clear();
-  placeTextToId.clear();
-  placeIdToName.clear();
-
-  // ---- categories（RLS 會自動只給你可看的）
-  {
-    const { data: cats, error } = await supabaseClient
-      .from("categories")
-      .select("id, name")
-      .limit(2000);
-
-    if (error) {
-      logDebug("load categories error", error);
-    } else {
-      for (const c of cats || []) {
-        categoryIdToName.set(c.id, c.name);
-        categoryTextToId.set(normKey(c.name), c.id);
-      }
-    }
-  }
-
-  // ---- category_synonyms（RLS 會自動只給你可看的 builtin + own）
-  {
-    const { data: syns, error } = await supabaseClient
-      .from("category_synonyms")
-      .select("category_id, synonym, user_id")
-      .limit(5000);
-
-    if (error) {
-      logDebug("load category_synonyms error", error);
-    } else {
-      for (const s of syns || []) {
-        if (!s.synonym || !s.category_id) continue;
-        categoryTextToId.set(normKey(s.synonym), s.category_id);
-      }
-    }
-  }
-
-  // ---- places
-  {
-    const { data: places, error } = await supabaseClient
-      .from("places")
-      .select("id, name")
-      .limit(2000);
-
-    if (error) {
-      logDebug("load places error", error);
-    } else {
-      for (const p of places || []) {
-        placeIdToName.set(p.id, p.name);
-        placeTextToId.set(normKey(p.name), p.id);
-      }
-    }
-  }
-
-  // ---- place_synonyms
-  {
-    const { data: ps, error } = await supabaseClient
-      .from("place_synonyms")
-      .select("place_id, synonym, user_id")
-      .limit(5000);
-
-    if (error) {
-      logDebug("load place_synonyms error", error);
-    } else {
-      for (const s of ps || []) {
-        if (!s.synonym || !s.place_id) continue;
-        placeTextToId.set(normKey(s.synonym), s.place_id);
-      }
-    }
-  }
-
-  // ---- datalist items（datalist 用名稱就好，不塞 synonym）
-  suggestCategories = Array.from(new Set(Array.from(categoryIdToName.values()))).sort();
-  suggestPlaces = Array.from(new Set(Array.from(placeIdToName.values()))).sort();
-
-  renderDatalist(categorySuggestEl, suggestCategories);
-  renderDatalist(placeSuggestEl, suggestPlaces);
-
-  logDebug("Suggest caches loaded", {
-    categories: suggestCategories.length,
-    places: suggestPlaces.length,
-    categoryTextToId: categoryTextToId.size,
-    placeTextToId: placeTextToId.size,
-  });
-}
-
 // ===============================
 // 6) ✅ 自訂分類/地點建立（僅限手動表單）
 // ===============================
-// ⭐ 你原本這兩個函式最大的問題：insert synonyms 少 user_id → 42501
-async function ensureCategorySynonym(userId, categoryId, synonym) {
+async function ensureCategorySynonym(categoryId, synonym) {
   const s = (synonym || "").trim();
-  if (!userId || !categoryId || !s) return;
+  if (!categoryId || !s) return;
 
-  // 用你 current user 範圍查（避免拿到別人的 user synonym）
   const { data, error } = await supabaseClient
     .from("category_synonyms")
     .select("id")
     .eq("category_id", categoryId)
     .eq("synonym", s)
-    .eq("user_id", userId) // ✅
     .limit(1)
     .maybeSingle();
 
   if (!error && data?.id) return;
 
-  await insertSynonymWithFallback(
-    "category_synonyms",
-    { user_id: userId, category_id: categoryId, synonym: s }, // ✅ 新版
-    { category_id: categoryId, synonym: s } // fallback
-  );
+  const { error: insErr } = await supabaseClient.from("category_synonyms").insert({ category_id: categoryId, synonym: s });
 
-  // 補強快取
-  categoryTextToId.set(normKey(s), categoryId);
+  if (insErr) {
+    logDebug("ensureCategorySynonym insert error", insErr);
+    logRlsHint(insErr, "category_synonyms");
+  }
 }
 
-async function ensurePlaceSynonym(userId, placeId, synonym) {
+async function ensurePlaceSynonym(placeId, synonym) {
   const s = (synonym || "").trim();
-  if (!userId || !placeId || !s) return;
+  if (!placeId || !s) return;
 
   const { data, error } = await supabaseClient
     .from("place_synonyms")
     .select("id")
     .eq("place_id", placeId)
     .eq("synonym", s)
-    .eq("user_id", userId) // ✅
     .limit(1)
     .maybeSingle();
 
   if (!error && data?.id) return;
 
-  await insertSynonymWithFallback(
-    "place_synonyms",
-    { user_id: userId, place_id: placeId, synonym: s }, // ✅ 新版
-    { place_id: placeId, synonym: s } // fallback
-  );
+  const { error: insErr } = await supabaseClient.from("place_synonyms").insert({ place_id: placeId, synonym: s });
 
-  placeTextToId.set(normKey(s), placeId);
+  if (insErr) {
+    logDebug("ensurePlaceSynonym insert error", insErr);
+    logRlsHint(insErr, "place_synonyms");
+  }
 }
 
 async function createCustomCategory(userId, name, type) {
@@ -410,20 +381,16 @@ async function createCustomCategory(userId, name, type) {
     is_builtin: false,
   };
 
-  const { data, error } = await supabaseClient
-    .from("categories")
-    .insert(payload)
-    .select("id, name")
-    .single();
+  const { data, error } = await supabaseClient.from("categories").insert(payload).select("id, name").single();
 
   if (error) {
     logDebug("createCustomCategory error", error);
+    logRlsHint(error, "categories");
     return null;
   }
 
   categoryIdToName.set(data.id, data.name);
   categoryTextToId.set(normKey(data.name), data.id);
-
   suggestCategories = Array.from(new Set(Array.from(categoryIdToName.values()))).sort();
   renderDatalist(categorySuggestEl, suggestCategories);
 
@@ -442,20 +409,16 @@ async function createCustomPlace(userId, name) {
     source: "manual",
   };
 
-  const { data, error } = await supabaseClient
-    .from("places")
-    .insert(payload)
-    .select("id, name")
-    .single();
+  const { data, error } = await supabaseClient.from("places").insert(payload).select("id, name").single();
 
   if (error) {
     logDebug("createCustomPlace error", error);
+    logRlsHint(error, "places");
     return null;
   }
 
   placeIdToName.set(data.id, data.name);
   placeTextToId.set(normKey(data.name), data.id);
-
   suggestPlaces = Array.from(new Set(Array.from(placeIdToName.values()))).sort();
   renderDatalist(placeSuggestEl, suggestPlaces);
 
@@ -468,14 +431,16 @@ async function resolveOrCreateCategoryIdForManual(userId, catText, type) {
 
   let id = resolveCategoryIdFast(text);
   if (id) {
-    await ensureCategorySynonym(userId, id, text); // ✅ 補 userId
+    await ensureCategorySynonym(id, text);
+    categoryTextToId.set(normKey(text), id);
     return id;
   }
 
   id = await createCustomCategory(userId, text, type);
   if (!id) return null;
 
-  await ensureCategorySynonym(userId, id, text); // ✅
+  await ensureCategorySynonym(id, text);
+  categoryTextToId.set(normKey(text), id);
   return id;
 }
 
@@ -485,14 +450,16 @@ async function resolveOrCreatePlaceIdForManual(userId, placeText) {
 
   let id = resolvePlaceIdFast(text);
   if (id) {
-    await ensurePlaceSynonym(userId, id, text); // ✅
+    await ensurePlaceSynonym(id, text);
+    placeTextToId.set(normKey(text), id);
     return id;
   }
 
   id = await createCustomPlace(userId, text);
   if (!id) return null;
 
-  await ensurePlaceSynonym(userId, id, text); // ✅
+  await ensurePlaceSynonym(id, text);
+  placeTextToId.set(normKey(text), id);
   return id;
 }
 
@@ -517,7 +484,8 @@ async function loadLedger() {
 
   const { data, error } = await supabaseClient
     .from("ledger_entries")
-    .select(`
+    .select(
+      `
       id,
       occurred_at,
       type,
@@ -527,7 +495,8 @@ async function loadLedger() {
       place_id,
       categories(name),
       places(name)
-    `)
+    `
+    )
     .order("occurred_at", { ascending: false })
     .order("id", { ascending: false });
 
@@ -546,9 +515,7 @@ async function loadLedger() {
   ledgerTbodyEl.innerHTML = "";
   for (const r of ledgerRows) {
     const typeLabel =
-      r.type === "income"
-        ? '<span class="badge-income">收入</span>'
-        : '<span class="badge-expense">支出</span>';
+      r.type === "income" ? '<span class="badge-income">收入</span>' : '<span class="badge-expense">支出</span>';
 
     const catName = r.categories?.name || "";
     const placeName = r.places?.name || "";
@@ -571,7 +538,7 @@ async function loadLedger() {
 }
 
 function escapeHtml(s) {
-  return String(s || "")
+  return String(s)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -670,9 +637,7 @@ async function submitEntry() {
     const category_id = await resolveOrCreateCategoryIdForManual(user.id, catText, type);
     const place_id = await resolveOrCreatePlaceIdForManual(user.id, placeText);
 
-    // ✅ RLS 重點：ledger_entries 寫入要帶 user_id
     const payload = {
-      user_id: user.id,
       occurred_at: date,
       type,
       amount,
@@ -685,24 +650,17 @@ async function submitEntry() {
 
     let error = null;
     if (editingEntryId) {
-      ({ error } = await supabaseClient
-        .from("ledger_entries")
-        .update(payload)
-        .eq("id", editingEntryId));
+      ({ error } = await supabaseClient.from("ledger_entries").update(payload).eq("id", editingEntryId));
     } else {
-      ({ error } = await supabaseClient
-        .from("ledger_entries")
-        .insert(payload));
+      ({ error } = await supabaseClient.from("ledger_entries").insert(payload));
     }
 
     if (error) {
       alert((editingEntryId ? "儲存修改失敗：" : "新增失敗：") + error.message);
       logDebug("submitEntry error", error);
+      logRlsHint(error, "ledger_entries");
       return;
     }
-
-    // 重新抓快取（因為你可能剛新增分類/地點/同義詞）
-    await loadSuggestCaches();
 
     cancelEditEntry();
     await loadLedger();
@@ -719,14 +677,12 @@ async function deleteEntry(id) {
   const ok = confirm("確定要刪除此筆記帳嗎？");
   if (!ok) return;
 
-  const { error } = await supabaseClient
-    .from("ledger_entries")
-    .delete()
-    .eq("id", id);
+  const { error } = await supabaseClient.from("ledger_entries").delete().eq("id", id);
 
   if (error) {
     alert("刪除失敗：" + error.message);
     logDebug("delete error", error);
+    logRlsHint(error, "ledger_entries");
     return;
   }
 
@@ -830,6 +786,7 @@ function extractAmount(seg) {
   return { amount, rest };
 }
 
+// 解析一段：日期 類型 分類 項目 金額 地點(可用關鍵字)
 function parseOneVoiceSegment(raw) {
   const seg0 = normalizeText(raw);
   if (!seg0) return null;
@@ -879,7 +836,26 @@ function calcHitStatus(e) {
   };
 }
 
-let voicePreviewBound = false;
+// ✅ 命中欄位文字/樣式
+function buildHitText(hit) {
+  const hitText = (hit.categoryOk ? "分類✅" : "分類⚠") + " / " + (hit.placeOk ? "地點✅" : "地點⚠");
+  const hitCls = hit.categoryOk && hit.placeOk ? "hit-ok" : "hit-warn";
+  return { hitText, hitCls };
+}
+
+// ✅ 只更新某一列命中欄位（不重繪整表，避免中文輸入法被打斷）
+function updateHitCellByIndex(idx) {
+  if (!voicePreviewBodyEl) return;
+  const cell = voicePreviewBodyEl.querySelector(`[data-hit-idx="${idx}"]`);
+  if (!cell) return;
+
+  const hit = calcHitStatus(pendingVoiceEntries[idx]);
+  const { hitText, hitCls } = buildHitText(hit);
+
+  cell.textContent = hitText;
+  cell.classList.remove("hit-ok", "hit-warn");
+  cell.classList.add(hitCls);
+}
 
 function renderVoicePreview() {
   if (!voicePreviewBodyEl) return;
@@ -898,9 +874,9 @@ function renderVoicePreview() {
 
   pendingVoiceEntries.forEach((e, idx) => {
     const typeLabel = e.type === "income" ? "收入" : "支出";
+
     const hit = calcHitStatus(e);
-    const hitText = (hit.categoryOk ? "分類✅" : "分類⚠") + " / " + (hit.placeOk ? "地點✅" : "地點⚠");
-    const hitCls = (hit.categoryOk && hit.placeOk) ? "hit-ok" : "hit-warn";
+    const { hitText, hitCls } = buildHitText(hit);
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -909,7 +885,9 @@ function renderVoicePreview() {
       <td>${typeLabel}</td>
 
       <td>
-        <input class="table-input" data-idx="${idx}" data-field="categoryText" list="category-suggest" value="${escapeHtml(e.categoryText)}" />
+        <input class="table-input" data-idx="${idx}" data-field="categoryText" list="category-suggest" value="${escapeHtml(
+      e.categoryText
+    )}" />
       </td>
 
       <td>
@@ -921,10 +899,13 @@ function renderVoicePreview() {
       </td>
 
       <td>
-        <input class="table-input" data-idx="${idx}" data-field="placeText" list="place-suggest" value="${escapeHtml(e.placeText)}" />
+        <input class="table-input" data-idx="${idx}" data-field="placeText" list="place-suggest" value="${escapeHtml(
+      e.placeText
+    )}" />
       </td>
 
-      <td class="${hitCls}">${hitText}</td>
+      <!-- ✅ 加 data-hit-idx，讓我們可以只更新命中欄 -->
+      <td class="${hitCls}" data-hit-idx="${idx}">${hitText}</td>
 
       <td>
         <button type="button" class="btn-secondary" onclick="removeVoiceEntry(${idx})">刪除</button>
@@ -937,13 +918,24 @@ function renderVoicePreview() {
   bindVoicePreviewInputs();
 }
 
+// ✅ 關鍵修正：不要在 input 每打一個字就 render 整表（會打斷中文輸入法 composition）
+let voicePreviewBound = false;
+
 function bindVoicePreviewInputs() {
   if (voicePreviewBound || !voicePreviewBodyEl) return;
   voicePreviewBound = true;
 
-  voicePreviewBodyEl.addEventListener("input", (ev) => {
+  let composing = false;
+
+  voicePreviewBodyEl.addEventListener("compositionstart", (ev) => {
+    const t = ev.target;
+    if (t instanceof HTMLInputElement) composing = true;
+  });
+
+  voicePreviewBodyEl.addEventListener("compositionend", (ev) => {
     const t = ev.target;
     if (!(t instanceof HTMLInputElement)) return;
+    composing = false;
 
     const idx = parseInt(t.getAttribute("data-idx"), 10);
     const field = t.getAttribute("data-field");
@@ -952,21 +944,47 @@ function bindVoicePreviewInputs() {
 
     if (field === "amount") {
       const v = parseFloat(t.value);
-      pendingVoiceEntries[idx].amount = Number.isFinite(v) ? v : pendingVoiceEntries[idx].amount;
+      if (Number.isFinite(v)) pendingVoiceEntries[idx].amount = v;
     } else {
       pendingVoiceEntries[idx][field] = t.value;
     }
 
-    // 重繪（命中欄會更新）
-    voicePreviewBound = false;
-    renderVoicePreview();
-  }, { passive: true });
+    // ✅ composition 結束後再更新命中欄（不重繪整表）
+    updateHitCellByIndex(idx);
+  });
+
+  voicePreviewBodyEl.addEventListener(
+    "input",
+    (ev) => {
+      const t = ev.target;
+      if (!(t instanceof HTMLInputElement)) return;
+
+      // ✅ 組字中不要動（不然注音會被打斷）
+      if (composing) return;
+
+      const idx = parseInt(t.getAttribute("data-idx"), 10);
+      const field = t.getAttribute("data-field");
+      if (!Number.isFinite(idx) || idx < 0 || idx >= pendingVoiceEntries.length) return;
+      if (!field) return;
+
+      if (field === "amount") {
+        const v = parseFloat(t.value);
+        if (Number.isFinite(v)) pendingVoiceEntries[idx].amount = v;
+      } else {
+        pendingVoiceEntries[idx][field] = t.value;
+      }
+
+      // ✅ 只更新該列命中欄位
+      updateHitCellByIndex(idx);
+    },
+    { passive: true }
+  );
 }
 
 function removeVoiceEntry(index) {
   if (index < 0 || index >= pendingVoiceEntries.length) return;
   pendingVoiceEntries.splice(index, 1);
-  voicePreviewBound = false;
+  // 注意：這裡會重繪整表（正常，因為刪列）
   renderVoicePreview();
   if (voiceStatusEl) voiceStatusEl.textContent = `已刪除一筆，目前剩 ${pendingVoiceEntries.length} 筆。`;
 }
@@ -978,15 +996,16 @@ function parseTextInput() {
 
   const newEntries = parseVoiceTextToEntries(text);
   if (!newEntries.length) {
-    if (voiceStatusEl) voiceStatusEl.textContent = "⚠ 無法解析，請用「日期 類型 分類 項目 金額（在地點/地點xxx）」格式。";
+    if (voiceStatusEl)
+      voiceStatusEl.textContent = "⚠ 無法解析，請用「日期 類型 分類 項目 金額（在地點/地點xxx）」格式。";
     return;
   }
 
   pendingVoiceEntries.push(...newEntries);
-  voicePreviewBound = false;
   renderVoicePreview();
 
-  let catOk = 0, placeOk = 0;
+  let catOk = 0,
+    placeOk = 0;
   for (const e of pendingVoiceEntries) {
     const hit = calcHitStatus(e);
     if (hit.categoryOk) catOk++;
@@ -1008,7 +1027,6 @@ function clearVoiceText() {
 
 function clearVoiceEntries() {
   pendingVoiceEntries = [];
-  voicePreviewBound = false;
   renderVoicePreview();
   if (voiceStatusEl) voiceStatusEl.textContent = "已清除所有暫存資料。";
 }
@@ -1040,8 +1058,8 @@ async function confirmVoiceEntries() {
       const category_id = resolveCategoryIdFast(e.categoryText) || null;
       const place_id = resolvePlaceIdFast(e.placeText) || null;
 
-      // ✅ 保守策略：對不到就不建，塞回 item 以免資訊消失
       let finalItem = (e.itemText || "").trim();
+
       if (!category_id && e.categoryText.trim()) {
         finalItem = `${finalItem} [分類:${e.categoryText.trim()}]`.trim();
       }
@@ -1052,9 +1070,7 @@ async function confirmVoiceEntries() {
       const amount = parseFloat(e.amount);
       if (!Number.isFinite(amount) || amount <= 0) continue;
 
-      // ✅ RLS 重點：語音寫入也要 user_id
       payloads.push({
-        user_id: user.id,
         occurred_at: e.occurred_at,
         type: e.type,
         amount,
@@ -1074,14 +1090,13 @@ async function confirmVoiceEntries() {
     if (error) {
       alert("語音寫入失敗：" + error.message);
       logDebug("voice insert error", error);
+      logRlsHint(error, "ledger_entries");
       return;
     }
 
     pendingVoiceEntries = [];
-    voicePreviewBound = false;
     renderVoicePreview();
     if (voiceStatusEl) voiceStatusEl.textContent = "✅ 語音記帳已寫入成功。";
-
     await loadLedger();
   } finally {
     isSubmittingVoice = false;
@@ -1111,7 +1126,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // 先載 Suggest caches（voice + autocomplete 都會用）
     await loadSuggestCaches();
     wireManualHitHints();
 
