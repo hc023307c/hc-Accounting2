@@ -2,6 +2,7 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>HC 記帳系統 - 登入</title>
   <link rel="stylesheet" href="style.css" />
   <!-- Supabase JS CDN -->
@@ -14,13 +15,8 @@
   <div class="card auth-card">
     <h1 class="title">HC 記帳系統 - 登入</h1>
 
-    <p id="js-status" class="small text-green">
-      JS 載入中…
-    </p>
-
-    <div id="auth-status" class="small text-gray">
-      尚未登入
-    </div>
+    <p id="js-status" class="small text-green">JS 載入中…</p>
+    <div id="auth-status" class="small text-gray">尚未登入</div>
 
     <section class="section">
       <h2 class="section-title">登入</h2>
@@ -31,12 +27,12 @@
 
       <div class="form-row">
         <label for="login-account">帳號（不含 @demo.local）</label>
-        <input id="login-account" type="text" placeholder="例如 admin / hc001 / hc002" />
+        <input id="login-account" type="text" placeholder="例如 admin / hc001 / hc002" autocomplete="username"/>
       </div>
 
       <div class="form-row">
         <label for="login-password">密碼</label>
-        <input id="login-password" type="password" placeholder="1qaz@WSX" />
+        <input id="login-password" type="password" placeholder="1qaz@WSX" autocomplete="current-password"/>
       </div>
 
       <div class="button-row">
@@ -48,7 +44,8 @@
       <h2 class="section-title">說明</h2>
       <ul class="small">
         <li>登入後會自動導向 <code>ledger.html</code>。</li>
-        <li>此專案使用 Supabase Auth + RLS 控制每位使用者只能看到自己的記帳資料，Admin 可查看全部。</li>
+        <li>此專案使用 Supabase Auth + RLS 控制每位使用者只能看到自己的記帳資料。</li>
+        <li>分類/地點支援內建與自訂；語音辨識只「引用」資料庫，不會自動建立（保守）。</li>
       </ul>
     </section>
 
