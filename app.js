@@ -123,16 +123,15 @@ async function getCurrentUser() {
 async function loadProfile(userId) {
   const { data, error } = await supabaseClient
     .from("profiles")
-    // ✅ 多讀一些常見的人名欄位，避免你 DB 欄位名不同造成讀不到
-    .select("account_code, role, display_name, full_name, name")
+    .select("display_name, account_code, role")
     .eq("id", userId)
-    .single();
+    .maybeSingle(); // ✅ 比 single 更不容易炸
 
   if (error) {
     logDebug("載入 profile 失敗", error);
     return null;
   }
-  return data;
+  return data || null;
 }
 
 
@@ -1260,11 +1259,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     wireManualHitHints();
 
     const profile = await loadProfile(user.id);
-const showName =
-  (profile?.display_name || "").trim() ||
-  (profile?.account_code || "").trim() ||
-  user.email ||
-  "使用者";
+logDebug("profile loaded", { userId: user.id, profile });
+
+const displayName = (profile?.display_name || "").trim();
+
+// ✅ 永遠顯示 display_name（真的沒有才 fallback）
+if (helloLineEl) {
+  helloLineEl.textContent = `Hello，${displayName || "（未設定姓名）"}`;
+}
+
 
 helloLineEl.textContent = `Hello，${showName}`;
     await loadZenQuote();
