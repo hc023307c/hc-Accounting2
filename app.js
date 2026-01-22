@@ -124,7 +124,7 @@ async function loadProfile(userId) {
   const { data, error } = await supabaseClient
     .from("profiles")
     // ✅ 多讀一些常見的人名欄位，避免你 DB 欄位名不同造成讀不到
-    .select("username, role, display_name, full_name, name")
+    .select("account_code, role, display_name, full_name, name")
     .eq("id", userId)
     .single();
 
@@ -1260,8 +1260,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     wireManualHitHints();
 
     const profile = await loadProfile(user.id);
-    const username = profile?.username || user.email || "使用者";
-    if (helloLineEl) helloLineEl.textContent = `Hello，${username}`;
+    const account_code = profile?.account_code || user.email || "使用者";
+    if (helloLineEl) helloLineEl.textContent = `Hello，${account_code}`;
 
     await loadZenQuote();
 
