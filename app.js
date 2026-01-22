@@ -637,16 +637,17 @@ async function submitEntry() {
     const category_id = await resolveOrCreateCategoryIdForManual(user.id, catText, type);
     const place_id = await resolveOrCreatePlaceIdForManual(user.id, placeText);
 
-    const payload = {
-      occurred_at: date,
-      type,
-      amount,
-      item: item || null,
-      category_id: category_id || null,
-      place_id: place_id || null,
-      source: "manual",
-      updated_at: new Date().toISOString(),
-    };
+const payload = {
+  user_id: user.id, // ✅ 新增這行（RLS 需要）
+  occurred_at: date,
+  type,
+  amount,
+  item: item || null,
+  category_id: category_id || null,
+  place_id: place_id || null,
+  source: "manual",
+  updated_at: new Date().toISOString(),
+};
 
     let error = null;
     if (editingEntryId) {
@@ -1070,15 +1071,16 @@ async function confirmVoiceEntries() {
       const amount = parseFloat(e.amount);
       if (!Number.isFinite(amount) || amount <= 0) continue;
 
-      payloads.push({
-        occurred_at: e.occurred_at,
-        type: e.type,
-        amount,
-        item: finalItem || null,
-        category_id,
-        place_id,
-        source: "speech",
-      });
+payloads.push({
+  user_id: user.id, // ✅ 新增這行（RLS 需要）
+  occurred_at: e.occurred_at,
+  type: e.type,
+  amount,
+  item: finalItem || null,
+  category_id,
+  place_id,
+  source: "speech",
+});
     }
 
     if (!payloads.length) {
