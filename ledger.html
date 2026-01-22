@@ -134,28 +134,45 @@
     </section>
 
     <!-- 記帳紀錄列表 -->
-    <section class="section" id="ledger-list">
-      <h2 class="section-title">記帳紀錄</h2>
+<section class="section" id="ledger-list">
+  <h2 class="section-title">
+    記帳紀錄
+    <button type="button" class="btn-secondary" style="margin-left:auto;" onclick="exportCsv()">匯出 CSV</button>
+  </h2>
 
-      <div class="table-wrap">
-        <table class="table">
-          <thead>
-          <tr>
-            <th>日期</th>
-            <th>類型</th>
-            <th>分類</th>
-            <th>項目</th>
-            <th>金額</th>
-            <th>地點</th>
-            <th>操作</th>
-          </tr>
-          </thead>
-          <tbody id="ledger-tbody">
-            <tr><td colspan="7">載入中...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+  <!-- 日期篩選區 -->
+  <div class="small text-gray" style="margin-bottom:6px;">
+    範圍：
+    <input type="date" id="filter-start" />
+    ～
+    <input type="date" id="filter-end" />
+    <button type="button" class="btn-secondary" onclick="applyDateFilter()">套用</button>
+
+    <button type="button" class="btn-secondary" onclick="quickRange('7d')">一週</button>
+    <button type="button" class="btn-secondary" onclick="quickRange('14d')">兩週</button>
+    <button type="button" class="btn-secondary" onclick="quickRange('30d')">一個月</button>
+    <button type="button" class="btn-secondary" onclick="quickRange('90d')">三個月</button>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+      <tr>
+        <th>日期</th>
+        <th>類型</th>
+        <th>分類</th>
+        <th>項目</th>
+        <th>金額</th>
+        <th>地點</th>
+        <th>操作</th>
+      </tr>
+      </thead>
+      <tbody id="ledger-tbody">
+        <tr><td colspan="7">載入中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
 
     <!-- Debug -->
     <section class="section">
