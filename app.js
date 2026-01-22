@@ -123,7 +123,8 @@ async function getCurrentUser() {
 async function loadProfile(userId) {
   const { data, error } = await supabaseClient
     .from("profiles")
-    .select("username, role")
+    // ✅ 多讀一些常見的人名欄位，避免你 DB 欄位名不同造成讀不到
+    .select("username, role, display_name, full_name, name")
     .eq("id", userId)
     .single();
 
@@ -133,6 +134,7 @@ async function loadProfile(userId) {
   }
   return data;
 }
+
 
 // ===============================
 // 3) Zen Quote（108 自在語）
