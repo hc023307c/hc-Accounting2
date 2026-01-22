@@ -1260,9 +1260,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     wireManualHitHints();
 
     const profile = await loadProfile(user.id);
-    const account_code = profile?.account_code || user.email || "使用者";
-    if (helloLineEl) helloLineEl.textContent = `Hello，${account_code}`;
+const showName =
+  (profile?.display_name || "").trim() ||
+  (profile?.account_code || "").trim() ||
+  user.email ||
+  "使用者";
 
+helloLineEl.textContent = `Hello，${showName}`;
     await loadZenQuote();
 
     const dateEl = document.getElementById("entry-date");
